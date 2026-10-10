@@ -1,0 +1,7 @@
+.git
+**/.dart_tool
+**/build
+**/*.env
+.env*
+server/data
+**/test
