@@ -1,9 +1,11 @@
 # Saf Dart runtime + tesseract (CAPTCHA OCR) ile tek aşamalı imaj.
-FROM dart:3.5 AS build
+# Taban sürüm, server/pubspec.lock'ın istediği Dart SDK (>=3.11) ile uyumlu
+# olmalı; lock, pub get'den ÖNCE kopyalanır ki çözümleme tekrarlanabilir olsun.
+FROM dart:3.13 AS build
 
 WORKDIR /app
 COPY packages/obs_core ./packages/obs_core
-COPY server/pubspec.yaml ./server/pubspec.yaml
+COPY server/pubspec.yaml server/pubspec.lock ./server/
 RUN dart pub get --directory ./server
 
 COPY server ./server

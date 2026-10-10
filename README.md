@@ -185,10 +185,109 @@ sudo certbot --nginx -d api.ornek-alanadi.com
 - **Runtime**: Docker
 - **Dockerfile Path**: `server/Dockerfile`
 - **Environment**: `API_TOKEN`, `OBS_USERNAME`, `OBS_PASSWORD`
-- **Volume**: 1 GB disk → `/app/data` (oturum ve `.env` kalıcı olsun)
 
-Ücretsiz katman uyur; uyandığında oturum cookie'si diskten geri gelir, gelmezse
-sunucu OCR ile sessizce yeniden giriş dener.
+> Kalıcı disk Render'da **yalnızca ücretli planda** var; ücretsiz planda
+> `session.json` her yeniden başlayışta gider ve disk **15 dakikada bir uyur**
+> (~50 sn soğuk başlangıç). Bu yüzden kalıcı oturum istiyorsan Seçenek A/C
+> tercih edilir.
+
+Ücretsiz katmanda sunucu uyandığında oturum cookie'si yoksa OCR ile sessizce
+yeniden giriş dener; OCR başarısız olursa `/admin/captcha` gerekir.
+
+### Seçenek C — Google Cloud always-free VM (uyumaz, 30 GB disk)
+
+Always-free kapsamı (Google'ın resmi free tier sayfası, 2026-10-07):
+
+- `us-west1`, `us-central1`, `us-east1` bölgelerinde 1 adet non-preemptible
+  **`e2-micro`** (1 GB RAM). Saat sınırı "ayda X saat" değil, **ayın toplam
+  saati** kadar → 7/24 çalıştırılabilir.
+- **30 GB** standard persistent disk.
+- Aylık **1 GB** çıkış trafiği (uygulama 10–15 dk'da bir ~15 KB çeker →
+  **~65 MB/ay**, limitin çok altında).
+
+> Bölgeler yalnızca ABD. OBS'i ABD IP'sinden istemek CAPTCHA oranını
+> artırabilir; gerekirse başka bir free bölgesi/Oracle'a dönülebilir.
+
+**1) Console'da VM aç** — billing hesabı gerekir (~$0–1 geçici blokaj):
+
+```bash
+gcloud compute instances create obs-api \
+  --machine-type=e2-micro --zone=us-central1-a \
+  --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud \
+  --boot-disk-size=10GB --tags=obs-api
+
+gcloud compute firewall-rules create allow-obs-8080 \
+  --allow=tcp:8080 --source-ranges=0.0.0.0/0 --target-tags=obs-api
+```
+
+**2) Bütçe uyarısı** (önerilir): Console → **Billing → Budgets & alerts →
+Create budget**, eşik **$1**. Free tier dışına çıkmadan haberin olur.
+
+**3) İmajı derle (Cloud Shell, tarayıcıda açılır — yerel Docker gerekmez)**
+
+`e2-micro` 1 GB RAM ile derleme yapamaz; `cloudbuild.yaml` imajı Google'ın
+altyapısında derler (ücretsiz: ayda 2500 dakika) ve Artifact Registry'ye iter:
+
+```bash
+git clone https://github.com/mehmetgokdeniz/obs_companion_app.git && cd obs_companion_app
+gcloud services enable cloudbuild.googleapis.com artifactregistry.googleapis.com
+gcloud artifacts repositories create obs-api --repository-format=docker --location=us-central1
+gcloud builds submit
+
+# VM'nin varsayılan servis hesabına imajı çekme yetkisi ver
+# (atlanırsa VM'de `docker pull` 403 döner)
+gcloud artifacts repositories add-iam-policy-binding obs-api \
+  --location=us-central1 \
+  --member="serviceAccount:$(gcloud config get-value project)-compute@developer.gserviceaccount.com" \
+  --role=roles/artifactregistry.reader
+```
+
+**4) VM'de** (`gcloud compute ssh obs-api --zone=us-central1-a`):
+
+```bash
+# 1 GB RAM yetersiz kalırsa dart/tesseract OOM kill yiyebilir → 2 GB swap
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+curl -fsSL https://get.docker.com | sh
+
+# Sunucu .env'i çalışma dizininden (/app) okur
+mkdir -p ~/obs-data
+cat > ~/obs-data/.env <<'EOF'
+API_TOKEN=<32+ karakter rastgele>
+OBS_USERNAME=<okul no>
+OBS_PASSWORD=<şifre>
+EOF
+chmod 600 ~/obs-data/.env
+
+gcloud auth configure-docker us-central1-docker.pkg.dev
+
+docker pull us-central1-docker.pkg.dev/<PROJE>/obs-api/obs-api:latest
+docker run -d --name obs-api --restart unless-stopped \
+  -p 8080:8080 \
+  -v "$HOME/obs-data:/app/data" \
+  -v "$HOME/obs-data/.env:/app/.env:ro" \
+  us-central1-docker.pkg.dev/<PROJE>/obs-api/obs-api:latest
+
+curl -s http://127.0.0.1:8080/health     # {"status":"ok",...} görmelisin
+```
+
+IP adresini al:
+
+```bash
+gcloud compute instances describe obs-api --zone=us-central1-a \
+  --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
+```
+
+Uygulamaya **`http://<VM-IP>:8080`** yaz (IP literal'ı `http://` ile açılır).
+
+> `.env` ayrı bir dosya olarak mount edilir; `data/` kalıcıdır, VM yeniden
+> başlasa da `session.json` silinmez → OBS'e sıfırdan giriş gerekmez.
+>
+> **Uyarı**: adres `http://` olduğu için token internet üzerinde düz metin
+> gider. Alan adın varsa Nginx + Let's Encrypt ile Seçenek A'daki gibi
+> HTTPS'e çevir.
 
 ### Güvenlik notları
 

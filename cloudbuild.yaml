@@ -1,0 +1,17 @@
+# Cloud Build, imajı e2-micro'nun 1 GB RAM'inde derlemek yerine Google'ın
+# altyapısında derler (ücretsiz: ayda 2500 derleme dakikası).
+#
+# Cloud Shell'de:
+#   gcloud services enable cloudbuild.googleapis.com artifactregistry.googleapis.com
+#   gcloud artifacts repositories create obs-api \
+#     --repository-format=docker --location=us-central1
+#   gcloud builds submit
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=server/Dockerfile
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/obs-api/obs-api:latest
+      - .
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/obs-api/obs-api:latest
