@@ -1,0 +1,15 @@
+project_id = "obs-companion"
+
+# API uçları kendi Bearer token (API_TOKEN) kontrolünü yapar; platform JWT
+# kontrolü bu yüzden kapalıdır. worker yalnızca cron'dan (anon JWT) çağrılır.
+[functions.status]
+verify_jwt = false
+
+[functions.all]
+verify_jwt = false
+
+[functions.captcha]
+verify_jwt = false
+
+[functions.worker]
+verify_jwt = true

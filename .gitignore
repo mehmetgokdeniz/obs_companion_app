@@ -52,5 +52,9 @@ server/.env
 server/data/
 *.env
 
+# Supabase CLI artiklari
+supabase/.temp/
+supabase/.branches/
+
 # Ajan arac ayarlari (kisisel notlar icerir)
 .commandcode/

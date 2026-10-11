@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:obs_core/obs_core.dart';
@@ -31,6 +32,12 @@ class ObsProvider extends ChangeNotifier with WidgetsBindingObserver {
   bool isLoading = false;
   String? errorMessage;
   String? studentName;
+
+  /// Sunucu manel güvenlik kodu bekliyor (OCR başarısız / oturum düşmüş).
+  bool needsManualCaptcha = false;
+
+  /// Manuel captcha akışı için indirilen görsel.
+  Uint8List? captchaImage;
 
   List<Course> courses = const [];
   List<ScheduleEntry> schedule = const [];
@@ -83,7 +90,8 @@ class ObsProvider extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     try {
-      await candidate.status();
+      final status = await candidate.status();
+      needsManualCaptcha = status['needsManualCaptcha'] == true;
     } on ObsException catch (e) {
       errorMessage = e.message;
       isLoading = false;
@@ -121,6 +129,8 @@ class ObsProvider extends ChangeNotifier with WidgetsBindingObserver {
     courses = const [];
     schedule = const [];
     attendance = const [];
+    needsManualCaptcha = false;
+    captchaImage = null;
     _hasLoadedGrades = false;
     notifyListeners();
   }
@@ -143,6 +153,8 @@ class ObsProvider extends ChangeNotifier with WidgetsBindingObserver {
       courses = payload.courses;
       schedule = payload.schedule;
       attendance = payload.attendance;
+      needsManualCaptcha = false;
+      captchaImage = null;
 
       await _saveCache(payload);
 
@@ -155,10 +167,69 @@ class ObsProvider extends ChangeNotifier with WidgetsBindingObserver {
     } on ObsException catch (e) {
       errorMessage = e.message;
       _scheduler.onFailure();
+      await _syncManualCaptchaFlag();
     }
 
     isLoading = false;
     notifyListeners();
+  }
+
+  /// Hata sonrası sunucunun manel captcha bekleyip beklemediğini sorar.
+  Future<void> _syncManualCaptchaFlag() async {
+    final api = _api;
+    if (api == null) return;
+    try {
+      final status = await api.status();
+      needsManualCaptcha = status['needsManualCaptcha'] == true;
+    } on ObsException {
+      // Status de düşüyorsa bayrak son bilinen değeri korur.
+    }
+  }
+
+  /// Manuel captcha görselini indirir (dialog açılışında çağrılır).
+  Future<void> fetchCaptcha() async {
+    final api = _api;
+    if (api == null) return;
+    try {
+      captchaImage = await api.captchaImage();
+      errorMessage = null;
+    } on ObsException catch (e) {
+      errorMessage = e.message;
+    }
+    notifyListeners();
+  }
+
+  /// Manuel girilen kodu dener; başarılıysa veriyi tazeler.
+  Future<bool> submitCaptcha(String code) async {
+    final api = _api;
+    if (api == null) return false;
+
+    isLoading = true;
+    notifyListeners();
+
+    try {
+      final result = await api.submitCaptcha(code);
+      if (result.success) {
+        needsManualCaptcha = false;
+        captchaImage = null;
+        errorMessage = null;
+        isLoading = false;
+        notifyListeners();
+        await refreshAll(force: true);
+        return true;
+      }
+
+      errorMessage = result.error ?? 'Giriş başarısız.';
+      if (result.image != null) captchaImage = result.image;
+      isLoading = false;
+      notifyListeners();
+      return false;
+    } on ObsException catch (e) {
+      errorMessage = e.message;
+      isLoading = false;
+      notifyListeners();
+      return false;
+    }
   }
 
   /// Son başarılı yanıtı önbelleğe yazar; çevrimdışı açılışta gösterilir.

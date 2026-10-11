@@ -1,15 +1,21 @@
 # OBS Companion + Kendine Özel OBS API
 
-Muş Alparslan Üniversitesi OBS verilerini (not, ders programı, devamsızlık)
-**giriş ekranı görmeden** çekmek için iki parçalı bir çözüm:
+[![CI](https://github.com/mehmetgokdeniz/obs_companion_app/actions/workflows/ci.yml/badge.svg)](https://github.com/mehmetgokdeniz/obs_companion_app/actions/workflows/ci.yml)
 
-1. **`server/`** — Kendi API sunucun. OBS'e senin adına giriş yapar (CAPTCHA'yı
-   OCR ile çözer), oturumu canlı tutar ve veriyi JSON olarak sunar.
+Muş Alparslan Üniversitesi OBS verilerini (not, ders programı, devamsızlık)
+**giriş ekranı görmeden** çekmek için çok parçalı bir çözüm:
+
+1. **`supabase/`** — Canlı API. Edge Functions (TypeScript) OBS'e senin adına
+   giriş yapar (CAPTCHA'yı saf JS OCR ile çözer, olmazsa uygulamada manel
+   akışa düşer), oturumu canlı tutar ve veriyi JSON olarak sunar.
+   pg_cron her 15 dakikada worker'ı çağırır (keep-alive + heartbeat).
 2. **`packages/obs_core/`** — OBS scraper + parser çekirdeği (saf Dart).
-   Hem sunucu hem uygulama aynı paketi kullanır; HTML değişikliğinin bakımı
-   tek yerdedir.
+   Yerel araçlar ve eski sunucu bunu kullanır; TS portu
+   `supabase/functions/_shared/` içindeki aynı parser'larla eşleşir.
 3. **Flutter uygulaması** — OBS'e hiç bağlanmaz; API'ye token ile bağlanır.
    Kurulum ekranına bir kez URL + token girersin, sonra hiçbir giriş görmezsin.
+4. **`server/`** — Eski Dart sunucusu (referans/legacy). VM'de çalıştırılmak
+   üzere tasarlanmıştı; Supabase göçünden sonra deploy yolu olarak kullanılmaz.
 
 Diğer uygulamaların da aynı API'yi kullanması yeterlidir: tek bir Bearer
 token, tek bir JSON uçları seti.
@@ -18,11 +24,15 @@ token, tek bir JSON uçları seti.
 
 ```
 Flutter uygulaması ──┐
-Diğer uygulamalar  ──┼── GET /api/v1/all (Bearer token) ──► server/ (Shelf)
-                     │                                       │
-                     │                                       ├─ obs_core (scrape)
-                     │                                       ├─ oturum cache + keep-alive
-                     │                                       └─ tesseract (CAPTCHA OCR)
+Diğer uygulamalar  ──┼── GET /status, /all, /captcha (Bearer token)
+                     │         │
+                     │         ▼
+                     │   Supabase Edge Functions (status, all, captcha)
+                     │         │  ├─ Postgres: session_state, snapshot,
+                     │         │  │            captcha_challenge, heartbeat
+                     │         │  └─ _shared: obs_client + parser + OCR
+                     │         │
+                     │   pg_cron (*/15) ──► worker: keep-alive + tarama ──► OBS
                      │
                      └─ yerel önbellek (çevrimdışı açılış)
 ```
@@ -31,21 +41,20 @@ Diğer uygulamalar  ──┼── GET /api/v1/all (Bearer token) ──► ser
 
 | Uç | Auth | Açıklama |
 |---|---|---|
-| `GET /health` | yok | canlılık kontrolü (load balancer için) |
-| `GET /api/v1/status` | Bearer | oturum/önbellek durumu |
-| `GET /api/v1/grades` | Bearer | notlar |
-| `GET /api/v1/schedule` | Bearer | ders programı |
-| `GET /api/v1/attendance` | Bearer | devamsızlık |
-| `GET /api/v1/all` | Bearer | üçü bir arada (uygulamanın tek isteği) |
-| `GET /admin/captcha` | Bearer | manel CAPTCHA sayfası (yalnızca OCR başarısızsa) |
+| `GET /status` | Bearer | oturum/önbellek durumu (+ `lastWorkerAt`) |
+| `GET /all` | Bearer | not + program + devamsızlık tek istekte |
+| `GET /captcha` | Bearer | taze CAPTCHA görseli (yalnızca manel akışta) |
+| `POST /captcha` | Bearer | manel kodu dener (`{"code": "70"}`) |
+| `worker` | Supabase JWT | pg_cron hedefi (uygulamadan çağrılmaz) |
 
-Tüm uçlar `?refresh=1` ile önbelleği yok sayar. Önbellek TTL'i 5 dakikadır;
-aynı pencere içinde OBS'e tekrar istek gitmez.
+`/all` önbellek TTL'i 5 dakikadır; `?refresh=1` önbelleği yok sayar. Taze
+snapshot varsa yanıt anlıktır (DB'den okunur), tazeyse OBS'ten çekilir.
 
 Örnek:
 
 ```bash
-curl -H "Authorization: Bearer $API_TOKEN" https://senin-alanadi.com/api/v1/all
+curl -H "Authorization: Bearer $API_TOKEN" \
+  "https://<REF>.supabase.co/functions/v1/all"
 ```
 
 ```json
@@ -75,18 +84,25 @@ süresini uzattığı sürece yeniden giriş nadiren gerekir.
 
 ### CAPTCHA ne zaman görülür?
 
-- **Normal durum**: hiç görmezsin. Keep-alive oturumu düşürmez; düşerse sunucu
-  tesseract ile rakam toplamasını çözüp sessizce yeniden giriş yapar.
-- **tesseract yok ya da OCR başarısız**: sunucu `needsManualCaptcha: true`
-  döner. `https://senin-alanadi.com/admin/captcha?token=...` adresini açıp
-  görseldeki rakamların toplamını bir kez girersin.
+- **Normal durum**: hiç görmezsin. Worker 15 dakikada bir oturumu canlı tutar;
+  düşerse saf JS OCR ile sessizce yeniden giriş dener.
+- **OCR başarısız** (`OCR_ENABLED=false` ya da eşik altı okuma): sunucu
+  `needsManualCaptcha: true` döner. Uygulamada sarı **"Oturum yenilemek için
+  güvenlik kodu gerekiyor"** bandındaki **Çöz** düğmesi dialogu açar: görsel
+  gelir, rakamların toplamını yazarsın, oturum açılır ve veri tazelenir.
+
+> OCR asla tahmin etmez: güvenilmeyen okuma null döner ve manel akış açılır
+> (yanlış cevap, sıfırdan daha kötüdür). Şablonlar gerçek örneklerden üretilir
+> (`supabase/tools/build_templates.ts`); LOO değerlendirmesinde **0 yanlış**
+> ölçümü vardır.
 
 ## Testler
 
 ```bash
-cd packages/obs_core && dart test   # parser + model + scheduler (15 test)
-cd server && dart test              # auth, uçlar, cache, rate-limit (9 test)
-flutter test                        # API istemcisi (4 test)
+deno test --config supabase/deno.json --allow-read supabase/tests   # parser port + expression + OCR (20 test)
+cd packages/obs_core && dart test   # parser + model + scheduler
+cd server && dart test              # eski sunucu: auth, uçlar, cache, rate-limit
+flutter test                        # API istemcisi + captcha akışı
 flutter analyze && (cd server && dart analyze) && (cd packages/obs_core && dart analyze)
 ```
 
@@ -111,6 +127,125 @@ vize/final/harf ve devamsızlık oranlarıyla listeler; gerçek OBS çıktısıy
 karşılaştırıp parser'ı düzeltmek için yeterlidir.
 
 ## Deploy
+
+### Seçenek S — Supabase (önerilen: tam göç, VM yok)
+
+Sistem tamamen serverless çalışır: scrape + keep-alive + API'nin tamamı
+Supabase'de. Free plan **kredi kartı istemez** (2 proje, 500 MB DB).
+
+> **Pause riski**: Free proje ~7 gün düşük veritabanı aktivitesinde
+> uyutulur. `*/15` cron'unun her çalıştırdığı heartbeat yazımı bunu önler;
+> yine de uyarı e-postası gelirse Dashboard → **Resume project** (veri
+> silinmez,1 yıl geri gelir).
+
+**1) Hesap + proje**
+
+1. [supabase.com/dashboard](https://supabase.com/dashboard) → GitHub/e-posta ile
+   giriş → **New project** → bölge seç (ör. `eu-central-1`) → DB şifresi not et.
+2. **Project Settings → API** sayfasındaki `Project ref`, `anon key` ve
+   `service_role key` değerlerini al.
+
+**2) CLI + bağlantı**
+
+```bash
+npm i -g supabase
+supabase login                      # tarayıcıyla yetkilendir
+supabase link --project-ref <REF>
+```
+
+**2b) OBS erişim relay'i (Cloudflare Worker — zorunlu)**
+
+> **Önemli**: OBS (`obs.alparslan.edu.tr`), veri merkezi IP'lerini TCP seviyesinde
+> resetler → Supabase'den doğrudan erişim YOK. Kanıtlanmış çözüm: şeffaf bir
+> Cloudflare Worker relay (ücretsiz, uyumaz,100k istek/gün; .tr origin'lere en
+> yakın POP'tan çıkış yaptığı için engeli aşar).
+
+```bash
+npx wrangler login      # GitHub ile, kart istemez
+npx wrangler deploy tools/obs-relay/worker.js --name obs-relay
+# çıktı: https://obs-relay.<kullanıcıadın>.workers.dev
+```
+
+(Panel yolu: Workers & Pages → Create → Hello World → **Edit code** ile
+`tools/obs-relay/worker.js` içeriğini yapıştır → Deploy.)
+
+**3) Şema + secret'lar + fonksiyonlar**
+
+```bash
+supabase db push                    # supabase/migrations/0001_init.sql
+
+supabase secrets set \
+  API_TOKEN=<32+ karakter rastgele> \
+  OBS_USERNAME=<okul no> \
+  OBS_PASSWORD=<şifre> \
+  OBS_BASE_URL=https://obs-relay.<kullanıcıadın>.workers.dev \
+  OCR_ENABLED=true
+
+supabase functions deploy status  --no-verify-jwt
+supabase functions deploy all     --no-verify-jwt
+supabase functions deploy captcha --no-verify-jwt
+supabase functions deploy worker            # JWT doğrulama açık kalır
+```
+
+- `API_TOKEN` uygulamanın kurulum ekranına gireceği token'dır.
+- `OCR_ENABLED=false` yaparsan otomatik OCR hiç denenmez, her yenilemede
+  manel akış açılır (test için yararlı).
+- `supabase/functions/_shared/` içindeki ortak modüller deploy'da otomatik
+  paketlenir.
+
+**4) Cron (keep-alive + heartbeat)**
+
+`supabase/migrations/0002_cron.sql` dosyasındaki `<REF>` ve `<ANON_KEY>`
+değerlerini doldurup `supabase db push` ile uygula. Alternatif olarak aynı
+SQL'i Dashboard → **SQL Editor**'de çalıştırabilirsin:
+
+```sql
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+
+select cron.schedule('obs-worker', '*/15 * * * *', $$
+  select net.http_post(
+    url := 'https://<REF>.supabase.co/functions/v1/worker',
+    headers := '{"Content-Type": "application/json",
+                "Authorization": "Bearer <ANON_KEY>"}'::jsonb,
+    body := '{}',
+    timeout_milliseconds := 30000
+  );
+$$);
+```
+
+**5) Doğrulama**
+
+```bash
+BASE="https://mqfnecoswcobbwlecmlf.supabase.co/functions/v1"   # <REF> kendi projen
+curl -s $BASE/status                                   # 401 (token'sız)
+curl -s -H "Authorization: Bearer $API_TOKEN" $BASE/status
+# {"sessionAlive":true,"needsManualCaptcha":false,...}
+
+supabase functions invoke worker                       # keep-alive + tarama
+# all veri dönmeli; oturum düşerse needsManualCaptcha: true gelir
+```
+
+İlk kullanımda (ya da OCR'ın çözemediği her durumda) `/captcha` görseli
+gelir; cevap görseldeki işlemin SONUCUDUR (ör. `29+5=?` → `34`).
+`POST /captcha {"code":"34"}` → `{"success":true}` → `/all` veriyi döner.
+
+Dashboard → **Database → Cron Jobs** listesinde `obs-worker` görünmeli;
+15 dakika sonra **Table Editor → heartbeat** satırı tazelenmelidir.
+
+**6) Uygulamaya bağlama**
+
+- API Adresi: `https://<REF>.supabase.co/functions/v1`
+- Token: `API_TOKEN`
+
+> Edge Function limitleri (Free): 150 sn wall-clock, 256 MB, istek başına
+> 2 sn CPU (I/O sayılmaz). Tarama işi bu bütçe altında; süre aşımında eski
+> snapshot korunur ve sonraki istek yeniden dener.
+
+### Legacy — Dart sunucusu (VM yolları, artık kullanılmıyor)
+
+Aşağıdaki seçenekler `server/` Docker imajını içerir; Supabase göçündan sonra
+deploy yolu olarak gerekmez. Yerel geliştirme ve referans olarak kalır.
 
 ### Seçenek A — Oracle Cloud Always Free VM (önerilir: uyumaz)
 
@@ -292,12 +427,18 @@ Uygulamaya **`http://<VM-IP>:8080`** yaz (IP literal'ı `http://` ile açılır)
 ### Güvenlik notları
 
 - `API_TOKEN` sızarsa notların okunur → HTTPS zorunlu, token'ı paylaşma.
+  Supabase fonksiyonları `verify_jwt=false` ile kendi Bearer kontrolünü yapar.
+- `service_role key` yalnızca edge function secret'larında yaşar; istemciye
+  asla gömülmez. `anon key` herkese açıktır (yalnızca cron çağrısında kullanılır).
 - `.env` ve `server/data/` git'e girmez (`.gitignore`'da).
-- Sunucu IP başına saniyede 1 istekle sınırlıdır (429 döner).
+- API, IP başına dakikada 60 istekle sınırlıdır (429 döner; isolate belleği
+  paylaşılmadığı için en iyi ihtimalle tahminidir — asıl koruma token'dadır).
 
 ## Uygulamayı bağlama
 
 1. Uygulamayı aç → **Kurulum** ekranı gelir.
-2. API adresi (`https://api.ornek-alanadi.com`) ve token'ı gir → **Bağlan**.
+2. API adresi (`https://<REF>.supabase.co/functions/v1`) ve `API_TOKEN`'ı gir
+   → **Bağlan**.
 3. Artık not/program/devamsızlık doğrudan gelir; OBS giriş ekranı görmezsin.
-4. Çıkış ikonu yalnızca bu yapılandırmayı siler (sunucudaki oturumu değil).
+4. Sarı güvenlik kodu bandı çıkarsa **Çöz** ile görseli gir; oturum açılır.
+5. Çıkış ikonu yalnızca bu yapılandırmayı siler (sunucudaki oturumu değil).

@@ -71,7 +71,8 @@ class _SetupViewState extends State<SetupView> {
               autocorrect: false,
               decoration: const InputDecoration(
                 labelText: 'API Adresi',
-                hintText: 'https://ornek-alanadi.com veya http://192.168.1.10:8080',
+                hintText: 'https://xxxx.supabase.co/functions/v1',
+                helperText: 'Supabase functions adresi ya da kendi sunucun',
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.language),
               ),

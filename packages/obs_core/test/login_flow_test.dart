@@ -1,3 +1,7 @@
+/// Canlı ağa atarlar; CI bunları `dart test --exclude-tags live` ile atlar.
+@Tags(['live'])
+library;
+
 import 'package:obs_core/obs_core.dart';
 import 'package:test/test.dart';
 

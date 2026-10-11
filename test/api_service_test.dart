@@ -10,7 +10,7 @@ void main() {
   group('ApiService', () {
     test('basarili yaniti modele cevirir', () async {
       final client = MockClient((request) async {
-        expect(request.url.path, '/api/v1/all');
+        expect(request.url.path, '/all');
         expect(request.headers['Authorization'], 'Bearer tok123');
         return http.Response.bytes(
           utf8.encode(jsonEncode({
@@ -71,6 +71,45 @@ void main() {
       await api.fetchAll(refresh: true);
 
       expect(seenQuery, isTrue);
+    });
+
+    test('captcha gorseli base64 olarak cozulur', () async {
+      final client = MockClient((request) async {
+        expect(request.url.path, '/captcha');
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({'imageBase64': base64Encode([1, 2, 3])})),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final api = ApiService(baseUrl: 'https://api.ornek.com', token: 't', client: client);
+      final image = await api.captchaImage();
+
+      expect(image, [1, 2, 3]);
+    });
+
+    test('basarisiz captcha gonderimi hatayi ve taze gorseli dondurur', () async {
+      final client = MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/captcha');
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'success': false,
+            'error': 'Güvenlik kodu hatalı.',
+            'imageBase64': base64Encode([9, 9]),
+          })),
+          401,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final api = ApiService(baseUrl: 'https://api.ornek.com', token: 't', client: client);
+      final result = await api.submitCaptcha('12');
+
+      expect(result.success, isFalse);
+      expect(result.error, 'Güvenlik kodu hatalı.');
+      expect(result.image, [9, 9]);
     });
 
     test('sunucu hatasinda ObsException firlatir', () async {

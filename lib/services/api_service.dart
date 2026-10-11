@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:obs_core/obs_core.dart';
@@ -77,12 +78,68 @@ class ApiService {
     return url;
   }
 
-  Future<Map<String, dynamic>> status() => _get('/api/v1/status');
+  Future<Map<String, dynamic>> status() => _get('/status');
 
   Future<ObsPayload> fetchAll({bool refresh = false}) async {
-    final json = await _get('/api/v1/all', refresh: refresh);
+    final json = await _get('/all', refresh: refresh);
     return ObsPayload.fromJson(json);
   }
+
+  /// Manuel captcha akışı: taze güvenlik kodu görselini indirir.
+  Future<Uint8List> captchaImage() async {
+    final json = await _get('/captcha');
+    final image = json['imageBase64'];
+    if (image is! String || image.isEmpty) {
+      throw const ObsException('CAPTCHA görseli alınamadı.');
+    }
+    return base64Decode(image);
+  }
+
+  /// Manuel girilen kodu dener; başarısızsa sunucu taze görselle döner.
+  Future<CaptchaSubmitResult> submitCaptcha(String code) async {
+    final uri = Uri.parse('$baseUrl/captcha');
+
+    final http.Response response;
+    try {
+      response = await _client
+          .post(
+            uri,
+            headers: {..._authHeaders, 'Content-Type': 'application/json'},
+            body: jsonEncode({'code': code}),
+          )
+          .timeout(_timeout);
+    } on TimeoutException {
+      throw const ObsException(
+        'API sunucusu zamanında yanıt vermedi. API adresini ve sunucunun '
+        'çalıştığını kontrol et.',
+      );
+    } on SocketException catch (e) {
+      throw ObsException('API sunucusuna bağlanılamadı: ${e.message}');
+    } on http.ClientException catch (e) {
+      throw ObsException('API bağlantısı kurulamadı: ${e.message}');
+    }
+
+    Map<String, dynamic> decoded;
+    try {
+      final body = jsonDecode(utf8.decode(response.bodyBytes));
+      decoded = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    } on FormatException {
+      decoded = <String, dynamic>{};
+    }
+
+    final imageBase64 = decoded['imageBase64'];
+    return CaptchaSubmitResult(
+      success: response.statusCode == 200,
+      error: decoded['error'] as String?,
+      image: imageBase64 is String && imageBase64.isNotEmpty
+          ? base64Decode(imageBase64)
+          : null,
+    );
+  }
+
+  Map<String, String> get _authHeaders => {
+        'Authorization': <String>['Bearer', token].join(' '),
+      };
 
   Future<Map<String, dynamic>> _get(
     String path, {
@@ -123,14 +180,25 @@ class ApiService {
   }
 
   Future<http.Response> _getWithRetry(Uri uri) async {
-    final headers = <String, String>{
-      'Authorization': <String>['Bearer', token].join(' '),
-    };
-
     try {
-      return await _client.get(uri, headers: headers).timeout(_timeout);
+      return await _client.get(uri, headers: _authHeaders).timeout(_timeout);
     } on TimeoutException {
-      return await _client.get(uri, headers: headers).timeout(_timeout);
+      return await _client.get(uri, headers: _authHeaders).timeout(_timeout);
     }
   }
+}
+
+/// Manuel captcha gönderiminin sonucu.
+class CaptchaSubmitResult {
+  final bool success;
+  final String? error;
+
+  /// Başarısız girişten sonra sunucunun döndüğü taze görsel (varsa).
+  final Uint8List? image;
+
+  const CaptchaSubmitResult({
+    required this.success,
+    this.error,
+    this.image,
+  });
 }

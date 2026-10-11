@@ -5,6 +5,7 @@ import 'package:obs_core/obs_core.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/obs_provider.dart';
+import 'captcha_dialog.dart';
 
 class HomeView extends StatefulWidget {
   const HomeView({super.key});
@@ -60,6 +61,10 @@ class _HomeViewState extends State<HomeView> {
                 ? const Center(child: CircularProgressIndicator())
                 : Column(
                     children: [
+                      if (provider.needsManualCaptcha)
+                        _CaptchaBanner(
+                          onSolve: () => showCaptchaDialog(context),
+                        ),
                       if (provider.errorMessage != null)
                         _ErrorBanner(message: provider.errorMessage!),
                       Expanded(
@@ -85,6 +90,37 @@ class _HomeViewState extends State<HomeView> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CaptchaBanner extends StatelessWidget {
+  final VoidCallback onSolve;
+
+  const _CaptchaBanner({required this.onSolve});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      color: Colors.amber.shade100,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          Icon(Icons.security, color: Colors.amber.shade900),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text(
+              'Oturum yenilemek için güvenlik kodu gerekiyor.',
+              style: TextStyle(color: Color(0xFF5D4300)),
+            ),
+          ),
+          TextButton(
+            onPressed: onSolve,
+            child: const Text('Çöz'),
+          ),
+        ],
       ),
     );
   }
