@@ -16,6 +16,11 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
+      # flutter analyze repo kökündeki tüm dart paketlerini tarar.
+      - run: dart pub get
+        working-directory: packages/obs_core
+      - run: dart pub get
+        working-directory: server
       - run: flutter analyze
       - run: flutter test
 
